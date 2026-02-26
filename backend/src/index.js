@@ -105,6 +105,7 @@ const vaultExportService = require('./services/vaultExportService');
 const authService = require('./services/authService');
 const notificationService = require('./services/notificationService');
 const pdfService = require('./services/pdfService');
+const VaultService = require('./services/vaultService');
 const monthlyReportJob = require('./jobs/monthlyReportJob');
 const { VaultReconciliationJob } = require('./jobs/vaultReconciliationJob');
 
@@ -573,6 +574,35 @@ app.get('/api/vaults/:id/export', async (req, res) => {
       res.status(500).json({ success: false, error: error.message });
     } else {
       res.destroy(error);
+    }
+  }
+});
+
+// Balance query endpoint
+app.get('/api/vaults/:id/balance', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const vaultService = new VaultService();
+    
+    const balanceInfo = await vaultService.queryBalanceInfo(id);
+    
+    res.json({
+      success: true,
+      data: balanceInfo.toJSON()
+    });
+  } catch (error) {
+    console.error('Error querying vault balance:', error);
+    
+    if (error.message && error.message.includes('not found')) {
+      res.status(404).json({
+        success: false,
+        error: error.message
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
     }
   }
 });

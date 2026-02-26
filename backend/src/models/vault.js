@@ -1,6 +1,12 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../database/connection');
 
+// TokenType enum
+const TokenType = {
+  STATIC: 'static',
+  DYNAMIC: 'dynamic'
+};
+
 const Vault = sequelize.define('Vault', {
   id: {
     type: DataTypes.UUID,
@@ -28,6 +34,12 @@ const Vault = sequelize.define('Vault', {
     type: DataTypes.DECIMAL(36, 18),
     allowNull: false,
     defaultValue: 0,
+  },
+  token_type: {
+    type: DataTypes.ENUM('static', 'dynamic'),
+    allowNull: false,
+    defaultValue: 'static',
+    comment: 'Token type: static (default) or dynamic (fee-on-transfer, rebase, tax tokens)',
   },
   tag: {
     type: DataTypes.STRING,
@@ -78,3 +90,4 @@ Vault.associate = function (models) {
 };
 
 module.exports = Vault;
+module.exports.TokenType = TokenType;
