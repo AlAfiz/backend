@@ -22,11 +22,6 @@ const SubSchedule = sequelize.define('SubSchedule', {
     allowNull: false,
     comment: 'Amount of tokens added in this top-up',
   },
-  created_at: {
-
-    type: DataTypes.DATE,
-    allowNull: false,
-  },
   cliff_duration: {
     type: DataTypes.INTEGER,
     allowNull: false,
@@ -59,11 +54,6 @@ const SubSchedule = sequelize.define('SubSchedule', {
     type: DataTypes.STRING,
     allowNull: false,
     comment: 'Transaction hash for this top-up',
-  },
-  block_number: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    comment: 'Block number for this top-up',
   },
   amount_withdrawn: {
     type: DataTypes.DECIMAL(36, 18),

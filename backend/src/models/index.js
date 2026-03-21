@@ -27,9 +27,6 @@ const models = {
   Beneficiary,
   Organization,
   RefreshToken,
-  Token,
-  OrganizationWebhook,
-
   Notification,
   DeviceToken,
   Token,

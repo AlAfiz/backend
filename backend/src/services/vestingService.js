@@ -1,24 +1,16 @@
-const { Vault, TokenType } = require('../models/vault');
+'use strict';
+
+const { Vault, Beneficiary, SubSchedule } = require('../models');
+const { sequelize } = require('../database/connection');
 const auditLogger = require('./auditLogger');
 
 class VestingService {
   /**
-   * Create a new vault
-   * 
+   * Create a new vault.
+   *
    * Supports two calling patterns for backward compatibility:
-   * 1. Individual parameters: createVault(adminAddress, vaultAddress, ownerAddress, ...)
-   * 2. Object parameter: createVault({ address, owner_address, token_address, ... })
-   * 
-   * @param {string|Object} adminAddressOrData - Admin address or vault data object
-   * @param {string} vaultAddress - Vault contract address (if using individual params)
-   * @param {string} ownerAddress - Owner address (if using individual params)
-   * @param {string} tokenAddress - Token contract address (if using individual params)
-   * @param {string|number} totalAmount - Total amount of tokens (if using individual params)
-   * @param {Date|string} startDate - Vesting start date (if using individual params)
-   * @param {Date|string} endDate - Vesting end date (if using individual params)
-   * @param {Date|string|null} cliffDate - Optional cliff date (if using individual params)
-   * @param {string} tokenType - Token type: 'static' (default) or 'dynamic' (if using individual params)
-   * @returns {Promise<Object>} Created vault object
+   *  1. Object parameter:     createVault({ address, owner_address, token_address, ... })
+   *  2. Individual parameters: createVault(adminAddress, vaultAddress, ownerAddress, ...)
    */
   async createVault(
     adminAddressOrData,
@@ -35,59 +27,65 @@ class VestingService {
       let vaultData;
       let adminAddress;
 
-      // Check if first parameter is an object (object-based call)
       if (typeof adminAddressOrData === 'object' && adminAddressOrData !== null) {
-        // Object-based call pattern
+        // ── Object-based call ──────────────────────────────────────────────
         vaultData = adminAddressOrData;
         adminAddress = vaultData.adminAddress || 'system';
-        
-        // Validate token type if provided
+
         if (vaultData.token_type && !['static', 'dynamic'].includes(vaultData.token_type)) {
           throw new Error(`Invalid token type: ${vaultData.token_type}. Must be 'static' or 'dynamic'`);
         }
 
-        // Create vault with token_type from object
         const vault = await Vault.create({
           address: vaultData.address,
           name: vaultData.name,
           owner_address: vaultData.owner_address,
           token_address: vaultData.token_address,
           total_amount: vaultData.initial_amount || vaultData.total_amount || 0,
-          token_type: vaultData.token_type || 'static', // Default to 'static' for backward compatibility
+          token_type: vaultData.token_type || 'static',
           tag: vaultData.tag,
-          org_id: vaultData.org_id
+          org_id: vaultData.org_id,
         });
 
-        // Log the action for audit
+        // Create beneficiaries if provided
+        if (Array.isArray(vaultData.beneficiaries) && vaultData.beneficiaries.length > 0) {
+          await Promise.all(
+            vaultData.beneficiaries.map((b) =>
+              Beneficiary.create({
+                vault_id: vault.id,
+                address: b.address,
+                total_allocated: b.allocation || 0,
+              })
+            )
+          );
+        }
+
         auditLogger.logAction(adminAddress, 'CREATE_VAULT', vault.address, {
           ownerAddress: vault.owner_address,
           tokenAddress: vault.token_address,
           totalAmount: vault.total_amount,
           tokenType: vault.token_type,
           name: vault.name,
-          tag: vault.tag
+          tag: vault.tag,
         });
 
         return vault;
       } else {
-        // Individual parameter call pattern
+        // ── Individual-parameter call ─────────────────────────────────────
         adminAddress = adminAddressOrData;
-        
-        // Validate token type
+
         if (tokenType && !['static', 'dynamic'].includes(tokenType)) {
           throw new Error(`Invalid token type: ${tokenType}. Must be 'static' or 'dynamic'`);
         }
 
-        // Create vault with token_type
         const vault = await Vault.create({
           address: vaultAddress,
           owner_address: ownerAddress,
           token_address: tokenAddress,
           total_amount: totalAmount || 0,
-          token_type: tokenType || 'static', // Default to 'static' for backward compatibility
+          token_type: tokenType || 'static',
         });
 
-        // Log the action for audit
         auditLogger.logAction(adminAddress, 'CREATE_VAULT', vaultAddress, {
           ownerAddress,
           tokenAddress,
@@ -95,7 +93,7 @@ class VestingService {
           tokenType: vault.token_type,
           startDate,
           endDate,
-          cliffDate
+          cliffDate,
         });
 
         return {
@@ -108,16 +106,265 @@ class VestingService {
             token_address: vault.token_address,
             total_amount: vault.total_amount,
             token_type: vault.token_type,
-            created_at: vault.created_at
+            created_at: vault.created_at,
           },
           adminAddress,
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         };
       }
     } catch (error) {
       console.error('Error in createVault:', error);
       throw error;
     }
+  }
+
+  /**
+   * Process a top-up for an existing vault.
+   *
+   * @param {Object} data
+   * @param {string} data.vault_address
+   * @param {string|number} data.amount
+   * @param {number} data.cliff_duration_seconds
+   * @param {number} data.vesting_duration_seconds
+   * @param {string} data.transaction_hash
+   * @param {number} [data.block_number]
+   * @param {Date|string} [data.timestamp]
+   * @returns {Promise<SubSchedule>}
+   */
+  async processTopUp(data) {
+    const {
+      vault_address,
+      amount,
+      cliff_duration_seconds = 0,
+      vesting_duration_seconds,
+      transaction_hash,
+      block_number = 0,
+      timestamp,
+    } = data;
+
+    const vault = await Vault.findOne({ where: { address: vault_address } });
+    if (!vault) {
+      throw new Error(`Vault not found: ${vault_address}`);
+    }
+
+    const topUpTime = timestamp ? new Date(timestamp) : new Date();
+    const cliffSeconds = cliff_duration_seconds || 0;
+
+    // Vesting starts after the cliff
+    const vestingStart = new Date(topUpTime.getTime() + cliffSeconds * 1000);
+    // Vesting ends after vesting_duration_seconds from when vesting starts
+    const vestingEnd = new Date(vestingStart.getTime() + vesting_duration_seconds * 1000);
+
+    const subSchedule = await SubSchedule.create({
+      vault_id: vault.id,
+      top_up_amount: String(amount),
+      cliff_duration: cliffSeconds,
+      cliff_date: cliffSeconds > 0 ? vestingStart : null,
+      vesting_start_date: vestingStart,
+      vesting_duration: vesting_duration_seconds,
+      start_timestamp: vestingStart,
+      end_timestamp: vestingEnd,
+      transaction_hash,
+      block_number,
+      amount_withdrawn: 0,
+      amount_released: 0,
+      is_active: true,
+    });
+
+    // Update vault total_amount
+    const currentTotal = parseFloat(vault.total_amount) || 0;
+    const addAmount = parseFloat(amount) || 0;
+    await vault.update({ total_amount: String(currentTotal + addAmount) });
+
+    return subSchedule;
+  }
+
+  /**
+   * Retrieve the full vesting schedule for a vault.
+   *
+   * @param {string} vaultAddress
+   * @param {string} [beneficiaryAddress] - Optional filter
+   * @returns {Promise<Object>}
+   */
+  async getVestingSchedule(vaultAddress, beneficiaryAddress = null) {
+    const vault = await Vault.findOne({ where: { address: vaultAddress } });
+    if (!vault) {
+      throw new Error(`Vault not found: ${vaultAddress}`);
+    }
+
+    const subSchedules = await SubSchedule.findAll({ where: { vault_id: vault.id } });
+
+    const bWhere = { vault_id: vault.id };
+    if (beneficiaryAddress) {
+      bWhere.address = beneficiaryAddress;
+    }
+    const beneficiaries = await Beneficiary.findAll({ where: bWhere });
+
+    return {
+      address: vault.address,
+      name: vault.name,
+      token_address: vault.token_address,
+      owner_address: vault.owner_address,
+      total_amount: vault.total_amount,
+      subSchedules: subSchedules.map((s) => s.toJSON()),
+      beneficiaries: beneficiaries.map((b) => b.toJSON()),
+    };
+  }
+
+  /**
+   * Calculate how much a beneficiary can withdraw right now.
+   *
+   * @param {string} vaultAddress
+   * @param {string} beneficiaryAddress
+   * @param {Date} [now]
+   * @returns {Promise<{withdrawable: number, total_vested: number, already_withdrawn: number}>}
+   */
+  async calculateWithdrawableAmount(vaultAddress, beneficiaryAddress, now = new Date()) {
+    const checkTime = new Date(now);
+
+    const vault = await Vault.findOne({ where: { address: vaultAddress } });
+    if (!vault) throw new Error(`Vault not found: ${vaultAddress}`);
+
+    const beneficiary = await Beneficiary.findOne({
+      where: { vault_id: vault.id, address: beneficiaryAddress },
+    });
+    if (!beneficiary) throw new Error(`Beneficiary not found: ${beneficiaryAddress}`);
+
+    const subSchedules = await SubSchedule.findAll({ where: { vault_id: vault.id, is_active: true } });
+
+    const totalAllocated = parseFloat(beneficiary.total_allocated) || 0;
+    const totalVaultAmount = parseFloat(vault.total_amount) || 0;
+    const allocationRatio = totalVaultAmount > 0 ? totalAllocated / totalVaultAmount : 0;
+
+    let totalVested = 0;
+    for (const schedule of subSchedules) {
+      const start = new Date(schedule.start_timestamp);
+      const end = new Date(schedule.end_timestamp);
+      const topUpAmount = parseFloat(schedule.top_up_amount) || 0;
+
+      if (checkTime <= start) {
+        // Before or at cliff end — nothing vested
+        continue;
+      }
+
+      if (checkTime >= end) {
+        // Fully vested
+        totalVested += topUpAmount;
+      } else {
+        // Linear vesting
+        const elapsed = checkTime.getTime() - start.getTime();
+        const duration = end.getTime() - start.getTime();
+        totalVested += topUpAmount * (elapsed / duration);
+      }
+    }
+
+    // Scale by beneficiary allocation ratio
+    const beneficiaryVested = totalVested * allocationRatio;
+    const alreadyWithdrawn = parseFloat(beneficiary.total_withdrawn) || 0;
+    const withdrawable = Math.max(0, beneficiaryVested - alreadyWithdrawn);
+
+    return {
+      withdrawable,
+      total_vested: beneficiaryVested,
+      already_withdrawn: alreadyWithdrawn,
+    };
+  }
+
+  /**
+   * Process a withdrawal for a beneficiary.
+   *
+   * @param {Object} data
+   * @param {string} data.vault_address
+   * @param {string} data.beneficiary_address
+   * @param {string|number} data.amount
+   * @param {string} data.transaction_hash
+   * @param {number} [data.block_number]
+   * @param {Date|string} [data.timestamp]
+   * @returns {Promise<{success: boolean, amount_withdrawn: number, distribution: Array}>}
+   */
+  async processWithdrawal(data) {
+    const {
+      vault_address,
+      beneficiary_address,
+      amount,
+      transaction_hash,
+      block_number = 0,
+      timestamp,
+    } = data;
+
+    const withdrawTime = timestamp ? new Date(timestamp) : new Date();
+    const withdrawAmount = parseFloat(amount);
+
+    const { withdrawable } = await this.calculateWithdrawableAmount(
+      vault_address,
+      beneficiary_address,
+      withdrawTime
+    );
+
+    if (withdrawAmount > withdrawable + 0.0001) {
+      // small epsilon for float rounding
+      throw new Error(
+        `Insufficient vested amount. Requested: ${withdrawAmount}, Available: ${withdrawable.toFixed(6)}`
+      );
+    }
+
+    const vault = await Vault.findOne({ where: { address: vault_address } });
+    const beneficiary = await Beneficiary.findOne({
+      where: { vault_id: vault.id, address: beneficiary_address },
+    });
+
+    const newWithdrawn = parseFloat(beneficiary.total_withdrawn) + withdrawAmount;
+    await beneficiary.update({ total_withdrawn: String(newWithdrawn) });
+
+    auditLogger.logAction(beneficiary_address, 'WITHDRAWAL', vault_address, {
+      amount: withdrawAmount,
+      transaction_hash,
+      block_number,
+      timestamp: withdrawTime,
+    });
+
+    return {
+      success: true,
+      amount_withdrawn: withdrawAmount,
+      distribution: [
+        {
+          beneficiary_address,
+          amount: withdrawAmount,
+          transaction_hash,
+        },
+      ],
+    };
+  }
+
+  /**
+   * Get a compact summary of a vault.
+   *
+   * @param {string} vaultAddress
+   * @returns {Promise<Object>}
+   */
+  async getVaultSummary(vaultAddress) {
+    const vault = await Vault.findOne({ where: { address: vaultAddress } });
+    if (!vault) throw new Error(`Vault not found: ${vaultAddress}`);
+
+    const subSchedules = await SubSchedule.findAll({ where: { vault_id: vault.id } });
+    const beneficiaries = await Beneficiary.findAll({ where: { vault_id: vault.id } });
+
+    const totalAmount = subSchedules.reduce(
+      (sum, s) => sum + (parseFloat(s.top_up_amount) || 0),
+      0
+    );
+
+    return {
+      vault_address: vault.address,
+      name: vault.name,
+      token_address: vault.token_address,
+      owner_address: vault.owner_address,
+      total_amount: totalAmount,
+      total_top_ups: subSchedules.length,
+      total_beneficiaries: beneficiaries.length,
+      sub_schedules: subSchedules.map((s) => s.toJSON()),
+      beneficiaries: beneficiaries.map((b) => b.toJSON()),
+    };
   }
 }
 

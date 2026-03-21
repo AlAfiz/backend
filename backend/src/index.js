@@ -266,6 +266,94 @@ app.use('/webhooks', webhooksRoutes);
 // Mount organization routes
 app.use('/api/org', organizationRoutes);
 
+// ── Vesting Routes ────────────────────────────────────────────────────────────
+
+// POST /api/vaults - Create a new vault
+app.post('/api/vaults', async (req, res) => {
+  try {
+    const vault = await vestingService.createVault(req.body);
+    res.status(201).json({ success: true, data: vault });
+  } catch (error) {
+    console.error('Error creating vault:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/vaults/:vaultAddress/top-up - Process a top-up
+app.post('/api/vaults/:vaultAddress/top-up', async (req, res) => {
+  try {
+    const { vaultAddress } = req.params;
+    const subSchedule = await vestingService.processTopUp({
+      vault_address: vaultAddress,
+      ...req.body,
+    });
+    res.status(201).json({ success: true, data: subSchedule });
+  } catch (error) {
+    console.error('Error processing top-up:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/vaults/:vaultAddress/schedule - Get vesting schedule
+app.get('/api/vaults/:vaultAddress/schedule', async (req, res) => {
+  try {
+    const { vaultAddress } = req.params;
+    const { beneficiaryAddress } = req.query;
+    const schedule = await vestingService.getVestingSchedule(vaultAddress, beneficiaryAddress);
+    res.json({ success: true, data: schedule });
+  } catch (error) {
+    console.error('Error fetching vesting schedule:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/vaults/:vaultAddress/:beneficiaryAddress/withdrawable - Calculate withdrawable
+app.get('/api/vaults/:vaultAddress/:beneficiaryAddress/withdrawable', async (req, res) => {
+  try {
+    const { vaultAddress, beneficiaryAddress } = req.params;
+    const { timestamp } = req.query;
+    const result = await vestingService.calculateWithdrawableAmount(
+      vaultAddress,
+      beneficiaryAddress,
+      timestamp ? new Date(timestamp) : new Date()
+    );
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error calculating withdrawable amount:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// POST /api/vaults/:vaultAddress/:beneficiaryAddress/withdraw - Process withdrawal
+app.post('/api/vaults/:vaultAddress/:beneficiaryAddress/withdraw', async (req, res) => {
+  try {
+    const { vaultAddress, beneficiaryAddress } = req.params;
+    const result = await vestingService.processWithdrawal({
+      vault_address: vaultAddress,
+      beneficiary_address: beneficiaryAddress,
+      ...req.body,
+    });
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error processing withdrawal:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// GET /api/vaults/:vaultAddress/summary - Vault summary
+app.get('/api/vaults/:vaultAddress/summary', async (req, res) => {
+  try {
+    const { vaultAddress } = req.params;
+    const summary = await vestingService.getVaultSummary(vaultAddress);
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error('Error fetching vault summary:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Merkle vesting airdrops (Issue #51)
 app.post('/api/merkle-vault/build-tree', async (req, res) => {
   try {
@@ -294,10 +382,6 @@ app.post('/api/claims', claimRateLimiter, async (req, res) => {
     res.status(201).json({ success: true, data: claim });
   } catch (error) {
     console.error('Error processing claim:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -359,10 +443,6 @@ app.post('/api/admin/revoke', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error revoking access:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -388,10 +468,6 @@ app.post('/api/admin/transfer', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error transferring vault:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -403,10 +479,6 @@ app.get('/api/admin/audit-logs', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error fetching audit logs:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -418,10 +490,6 @@ app.post('/api/admin/propose-new-admin', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error proposing new admin:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -433,10 +501,6 @@ app.post('/api/admin/accept-ownership', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error accepting ownership:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -448,10 +512,6 @@ app.post('/api/admin/transfer-ownership', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error transferring ownership:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -463,10 +523,6 @@ app.get('/api/admin/pending-transfers', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error fetching pending transfers:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -756,7 +812,6 @@ const startServer = async () => {
     console.log('Database synchronized successfully.');
 
     // Initialize Redis Cache
-    console.log('Database synchronized successfully.');
 
     try {
       await cacheService.connect();
