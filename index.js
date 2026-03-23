@@ -68,10 +68,12 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
+  const dbStatus = dbManager.getStatus();
   res.json({ 
     project: 'Vesting Vault', 
     status: 'Tracking Locked Tokens', 
-    contract: 'CD5QF6KBAURVUNZR2EVBJISWSEYGDGEEYVH2XYJJADKT7KFOXTTIXLHU' 
+    contract: 'CD5QF6KBAURVUNZR2EVBJISWSEYGDGEEYVH2XYJJADKT7KFOXTTIXLHU',
+    database: dbStatus
   });
 });
 
