@@ -46,6 +46,18 @@ app.use(require('cookie-parser')());
 // Apply wallet-based rate limiting to all API routes
 app.use('/api', walletRateLimitMiddleware);
 
+// Import and apply vault pause middleware
+const { vaultPauseMiddleware, vaultStatusMiddleware } = require('./middleware/vaultPause.middleware');
+
+// Apply vault status middleware to all API routes
+app.use('/api', vaultStatusMiddleware);
+
+// Apply vault pause middleware to vault-specific endpoints
+app.use('/api/vaults', vaultPauseMiddleware);
+app.use('/api/claims', vaultPauseMiddleware);
+app.use('/api/user', vaultPauseMiddleware);
+app.use('/api/admin/vault', vaultPauseMiddleware);
+
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpecs));
 
 const claimRateLimiter = rateLimit({
@@ -106,6 +118,7 @@ const vaultExportService = require('./services/vaultExportService');
 const authService = require('./services/authService');
 const notificationService = require('./services/notificationService');
 const pdfService = require('./services/pdfService');
+const ledgerSyncService = require('./services/ledgerSyncService');
 const VaultService = require('./services/vaultService');
 const monthlyReportJob = require('./jobs/monthlyReportJob');
 const { VaultReconciliationJob } = require('./jobs/vaultReconciliationJob');
@@ -806,6 +819,48 @@ app.get('/api/vault/:id/agreement.pdf', async (req, res) => {
     } else {
       res.destroy(error);
     }
+    // Token distribution endpoint for pie chart data
+    app.get('/api/token/:address/distribution', async (req, res) => {
+      try {
+        const { address } = req.params;
+        const { Vault } = require('./models');
+
+        // Get all vaults for this token address, grouped by tag
+        const distribution = await Vault.findAll({
+          attributes: [
+            'tag',
+            [sequelize.fn('SUM', sequelize.col('total_amount')), 'total_amount']
+          ],
+          where: {
+            token_address: address,
+            total_amount: {
+              [sequelize.Op.gt]: 0
+            }
+          },
+          group: ['tag'],
+          raw: true
+        });
+
+        // Format the response
+        const result = distribution
+          .filter(item => item.tag) // Filter out null tags
+          .map(item => ({
+            label: item.tag,
+            amount: parseFloat(item.total_amount)
+          }))
+          .sort((a, b) => b.amount - a.amount); // Sort by amount descending
+
+        res.json({
+          success: true,
+          data: result
+        });
+      } catch (error) {
+        console.error('Error fetching token distribution:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
   }
 });
 
@@ -850,79 +905,114 @@ app.get('/api/token/:address/distribution', async (req, res) => {
       success: false,
       error: error.message
     });
-  }
-});
 
-// Sentry error handler must be before any other error middleware and after all controllers
-if (process.env.SENTRY_DSN && Sentry.Handlers) {
-  app.use(Sentry.Handlers.errorHandler());
-}
+    // Sentry error handler must be before any other error middleware and after all controllers
+    if (process.env.SENTRY_DSN && Sentry.Handlers) {
+      app.use(Sentry.Handlers.errorHandler());
+    }
 
-// Start server
-const startServer = async () => {
-  try {
-    await sequelize.authenticate();
-    console.log('Database connection established successfully.');
+    // Start server
+    const startServer = async () => {
+      try {
+        await sequelize.authenticate();
+        console.log('Database connection established successfully.');
 
-    await sequelize.sync();
-    console.log('Database synchronized successfully.');
+        await sequelize.sync();
+        console.log('Database synchronized successfully.');
 
+        // Initialize Redis Cache
+        console.log('Database synchronized successfully.');
+
+        try {
+          await cacheService.connect();
+          if (cacheService.isReady()) {
+            console.log('Redis cache connected successfully.');
+          } else {
+            console.log('Redis cache not available, continuing without caching...');
+          }
+        } catch (cacheError) {
+          console.error('Failed to connect to Redis:', cacheError);
+          console.log('Continuing without Redis cache...');
+        }
+
+        // Initialize GraphQL Server
+        let graphQLServer = null;
+        try {
+          const { GraphQLServer } = require('./graphql/server');
+          graphQLServer = new GraphQLServer(app, httpServer);
+          await graphQLServer.start();
+          await graphQLServer.applyMiddleware(app);
+          console.log('GraphQL Server initialized successfully.');
+
+          const serverInfo = graphQLServer.getServerInfo();
+          console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
+          console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
+        } catch (graphqlError) {
+          console.error('Failed to initialize GraphQL Server:', graphqlError);
+          console.log('Continuing with REST API only...');
+        }
+
+        // Initialize Discord Bot
+        try {
+          await discordBotService.start();
+        } catch (discordError) {
+          console.error('Failed to initialize Discord Bot:', discordError);
+          console.log('Continuing without Discord bot...');
+        }
     // Initialize Redis Cache
 
-    try {
-      await cacheService.connect();
-      if (cacheService.isReady()) {
-        console.log('Redis cache connected successfully.');
-      } else {
-        console.log('Redis cache not available, continuing without caching...');
-      }
-    } catch (cacheError) {
-      console.error('Failed to connect to Redis:', cacheError);
-      console.log('Continuing without Redis cache...');
-    }
+        // Initialize Monthly Report Job
+        try {
+          monthlyReportJob.start();
+        } catch (jobError) {
+          console.error('Failed to initialize Monthly Report Job:', jobError);
+        }
 
-    // Initialize GraphQL Server
-    let graphQLServer = null;
-    try {
-      const { GraphQLServer } = require('./graphql/server');
-      graphQLServer = new GraphQLServer(app, httpServer);
-      await graphQLServer.start();
-      await graphQLServer.applyMiddleware(app);
-      console.log('GraphQL Server initialized successfully.');
+        // Initialize Vault Reconciliation Job
+        const vaultReconciliationJob = new VaultReconciliationJob();
+        try {
+          vaultReconciliationJob.start();
+          console.log('Vault Reconciliation Job started successfully.');
+        } catch (jobError) {
+          console.error('Failed to initialize Vault Reconciliation Job:', jobError);
+          console.log('Continuing without vault reconciliation...');
+        }
 
-      const serverInfo = graphQLServer.getServerInfo();
-      console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
-      console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
-    } catch (graphqlError) {
-      console.error('Failed to initialize GraphQL Server:', graphqlError);
-      console.log('Continuing with REST API only...');
-    }
+        // Initialize Notification Service (includes cliff notification cron job)
+        try {
+          notificationService.start();
+          console.log('Notification service started successfully.');
+        } catch (notificationError) {
+          console.error('Failed to initialize Notification Service:', notificationError);
+          console.log('Continuing without notification cron job...');
+        }
 
-    // Initialize Discord Bot
-    try {
-      await discordBotService.start();
-    } catch (discordError) {
-      console.error('Failed to initialize Discord Bot:', discordError);
-      console.log('Continuing without Discord bot...');
-    }
+        // Initialize Ledger Sync Service - Critical for financial consistency
+        try {
+          await ledgerSyncService.loadPausedVaults();
+          ledgerSyncService.start();
+          console.log('🔍 Ledger Sync Service started - checking vault consistency every 60 seconds');
+        } catch (ledgerError) {
+          console.error('❌ Failed to initialize Ledger Sync Service:', ledgerError);
+          console.log('⚠️  WARNING: Ledger consistency checking is disabled - financial data may be inconsistent!');
+          Sentry.captureException(ledgerError, {
+            tags: { service: 'ledger-sync', severity: 'critical' },
+            extra: { impact: 'Financial consistency checking disabled' }
+          });
+        }
 
-    // Initialize Monthly Report Job
-    try {
-      monthlyReportJob.start();
-    } catch (jobError) {
-      console.error('Failed to initialize Monthly Report Job:', jobError);
-    }
+        // Start the HTTP server
+        httpServer.listen(PORT, () => {
+          console.log(`Server is running on port ${PORT}`);
+          console.log(`REST API available at: http://localhost:${PORT}`);
+          if (graphQLServer) {
+            console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
+          }
 
-    // Initialize Vault Reconciliation Job
-    const vaultReconciliationJob = new VaultReconciliationJob();
-    try {
-      vaultReconciliationJob.start();
-      console.log('Vault Reconciliation Job started successfully.');
-    } catch (jobError) {
-      console.error('Failed to initialize Vault Reconciliation Job:', jobError);
-      console.log('Continuing without vault reconciliation...');
-    }
-
+        });
+      } catch (error) {
+        console.error('Unable to start server:', error);
+        process.exit(1);
     // Initialize Vault Archival Job
     try {
       vaultArchivalJob.start();
@@ -947,7 +1037,9 @@ const startServer = async () => {
       if (graphQLServer) {
         console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
       }
+    };
 
+    startServer();
     });
   } catch (error) {
     console.error('Unable to start server:', error);
