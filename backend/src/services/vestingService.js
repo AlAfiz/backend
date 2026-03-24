@@ -292,6 +292,7 @@ class VestingService {
 
   /**
    * Process a withdrawal for a beneficiary.
+   * Updated to track cumulative claimed amounts to prevent dust loss.
    *
    * @param {Object} data
    * @param {string} data.vault_address
@@ -333,8 +334,40 @@ class VestingService {
       where: { vault_id: vault.id, address: beneficiary_address },
     });
 
+    // Update beneficiary total_withdrawn (legacy field)
     const newWithdrawn = parseFloat(beneficiary.total_withdrawn) + withdrawAmount;
     await beneficiary.update({ total_withdrawn: String(newWithdrawn) });
+
+    // Update subschedule cumulative_claimed_amount to prevent dust loss
+    const subSchedules = await SubSchedule.findAll({ 
+      where: { vault_id: vault.id, is_active: true } 
+    });
+
+    // Distribute withdrawal proportionally across subschedules
+    const totalVested = subSchedules.reduce((total, schedule) => {
+      const vested = this._calculateScheduleVestedAmount(schedule, withdrawTime);
+      return total + vested;
+    }, 0);
+
+    const distribution = [];
+    for (const schedule of subSchedules) {
+      const scheduleVested = this._calculateScheduleVestedAmount(schedule, withdrawTime);
+      if (totalVested > 0 && scheduleVested > 0) {
+        const proportion = scheduleVested / totalVested;
+        const scheduleWithdrawAmount = withdrawAmount * proportion;
+        
+        // Update cumulative claimed amount for this subschedule
+        const currentCumulative = parseFloat(schedule.cumulative_claimed_amount || 0);
+        const newCumulative = currentCumulative + scheduleWithdrawAmount;
+        await schedule.update({ cumulative_claimed_amount: String(newCumulative) });
+
+        distribution.push({
+          subschedule_id: schedule.id,
+          amount: scheduleWithdrawAmount,
+          transaction_hash,
+        });
+      }
+    }
 
     auditLogger.logAction(beneficiary_address, 'WITHDRAWAL', vault_address, {
       amount: withdrawAmount,
@@ -346,17 +379,43 @@ class VestingService {
     return {
       success: true,
       amount_withdrawn: withdrawAmount,
-      distribution: [
-        {
-          beneficiary_address,
-          amount: withdrawAmount,
-          transaction_hash,
-        },
-      ],
+      distribution,
     };
   }
 
   /**
+   * Helper method to calculate vested amount for a subschedule
+   * Uses the same logic as ClaimCalculator to prevent dust loss
+   * @private
+   */
+  _calculateScheduleVestedAmount(subSchedule, currentTime) {
+    const asOfDate = currentTime instanceof Date ? currentTime : new Date(currentTime);
+    
+    // Check if cliff has passed
+    if (subSchedule.cliff_date && asOfDate < subSchedule.cliff_date) {
+      return 0;
+    }
+
+    // Check if vesting hasn't started
+    if (asOfDate < subSchedule.vesting_start_date) {
+      return 0;
+    }
+
+    // Check if vesting has fully completed
+    const vestingEnd = new Date(
+      subSchedule.vesting_start_date.getTime() + subSchedule.vesting_duration * 1000
+    );
+    if (asOfDate >= vestingEnd) {
+      return parseFloat(subSchedule.top_up_amount);
+    }
+
+    // Calculate vested amount using the new formula: Total_Vested = (Elapsed_Time * Total_Allocation) / Total_Duration
+    const elapsedTimeInSeconds = Math.floor((asOfDate - subSchedule.vesting_start_date) / 1000);
+    const totalAllocation = parseFloat(subSchedule.top_up_amount);
+    const totalDurationInSeconds = subSchedule.vesting_duration;
+    
+    const totalVested = (elapsedTimeInSeconds * totalAllocation) / totalDurationInSeconds;
+    return totalVested;
    * Calculate a clean break payout for a terminated beneficiary.
    *
    * Returns two-part instructions:
