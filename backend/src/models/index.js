@@ -1,21 +1,12 @@
 const { sequelize } = require('../database/connection');
 
-
-
 const ClaimsHistory = require('./claimsHistory');
-
 const Vault = require('./vault');
-
 const SubSchedule = require('./subSchedule');
-
 const TVL = require('./tvl');
-
 const Beneficiary = require('./beneficiary');
-
 const Organization = require('./organization');
-
 const Notification = require('./notification');
-
 const RefreshToken = require('./refreshToken');
 const RevocationProposal = require('./revocationProposal');
 const RevocationSignature = require('./revocationSignature');
@@ -28,7 +19,6 @@ const VaultLegalDocument = require('./vaultLegalDocument');
 const VaultLiquidityAlert = require('./vaultLiquidityAlert');
 
 const { Token, initTokenModel } = require('./token');
-
 const { OrganizationWebhook, initOrganizationWebhookModel } = require('./organizationWebhook');
 
 
@@ -46,20 +36,14 @@ initOrganizationWebhookModel(sequelize);
 
 
 const models = {
-
   ClaimsHistory,
-
   Vault,
-
   SubSchedule,
-
   TVL,
-
   Beneficiary,
-
   Organization,
-  RefreshToken,
   Notification,
+  RefreshToken,
   DeviceToken,
   VaultLegalDocument,
   VaultLiquidityAlert,
@@ -69,17 +53,12 @@ const models = {
   DividendRound,
   DividendDistribution,
   DividendSnapshot,
+  DeviceToken,
+  VaultLegalDocument,
+  VaultLiquidityAlert,
   Token,
   OrganizationWebhook,
-
-
-
-  RefreshToken,
-  Notification,
-  DeviceToken,
-
   sequelize,
-
 };
 
 

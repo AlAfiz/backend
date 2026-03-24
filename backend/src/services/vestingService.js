@@ -357,6 +357,98 @@ class VestingService {
   }
 
   /**
+   * Calculate a clean break payout for a terminated beneficiary.
+   *
+   * Returns two-part instructions:
+   *  1) accrued earned tokens to employee
+   *  2) unearned tokens back to treasury
+   */
+  async calculateCleanBreak(vaultAddress, beneficiaryAddress, terminationTime = new Date(), treasuryAddress = null) {
+    const terminationDate = new Date(terminationTime);
+
+    const vault = await Vault.findOne({ where: { address: vaultAddress } });
+    if (!vault) {
+      throw new Error(`Vault not found: ${vaultAddress}`);
+    }
+    if (vault.is_blacklisted) {
+      throw new Error(`Vault ${vaultAddress} is blacklisted due to integrity failure. Operations are disabled.`);
+    }
+
+    const beneficiary = await Beneficiary.findOne({ where: { vault_id: vault.id, address: beneficiaryAddress } });
+    if (!beneficiary) {
+      throw new Error(`Beneficiary not found: ${beneficiaryAddress}`);
+    }
+
+    // Calculate direct vesting from active sub-schedules at terminationDate.
+    const subSchedules = await SubSchedule.findAll({ where: { vault_id: vault.id, is_active: true } });
+
+    let rawVestedAmount = 0;
+    let totalScheduleAmount = 0;
+
+    for (const schedule of subSchedules) {
+      const topUpAmount = parseFloat(schedule.top_up_amount) || 0;
+      const cliffEnd = new Date(schedule.vesting_start_date);
+      const startTime = cliffEnd.getTime();
+      const endTime = new Date(schedule.end_timestamp).getTime();
+
+      totalScheduleAmount += topUpAmount;
+
+      if (terminationDate < cliffEnd) {
+        continue;
+      }
+
+      if (terminationDate >= endTime) {
+        rawVestedAmount += topUpAmount;
+      } else {
+        const elapsed = terminationDate.getTime() - startTime;
+        const duration = endTime - startTime;
+        const vestedRatio = duration > 0 ? Math.min(1, Math.max(0, elapsed / duration)) : 1;
+        rawVestedAmount += topUpAmount * vestedRatio;
+      }
+    }
+
+    const totalAllocated = parseFloat(beneficiary.total_allocated) || 0;
+    const allocationRatio = totalScheduleAmount > 0 ? Math.min(1, totalAllocated / totalScheduleAmount) : 0;
+
+    const totalVested = rawVestedAmount * allocationRatio;
+    const alreadyWithdrawn = parseFloat(beneficiary.total_withdrawn) || 0;
+
+    const accruedSinceLastClaim = Math.max(0, totalVested - alreadyWithdrawn);
+    const unearnedAmount = Math.max(0, totalAllocated - totalVested);
+
+    const employeeTransfer = {
+      from: vault.owner_address,
+      to: beneficiary.address,
+      amount: parseFloat(accruedSinceLastClaim).toString(),
+      type: 'CLEAN_BREAK_EARNED_PAYOUT',
+      memo: 'Pro-rata vested accrued amount at termination',
+    };
+
+    const treasuryTransfer = {
+      from: vault.owner_address,
+      to: treasuryAddress || vault.owner_address,
+      amount: parseFloat(unearnedAmount).toString(),
+      type: 'CLEAN_BREAK_UNEARNED_RETURN',
+      memo: 'Unvested amount returned to treasury on termination',
+    };
+
+    return {
+      vault_address: vaultAddress,
+      beneficiary_address: beneficiaryAddress,
+      termination_timestamp: terminationDate.toISOString(),
+      accrued_since_last_claim: accruedSinceLastClaim,
+      total_vested_at_termination: totalVested,
+      total_allocated: totalAllocated,
+      unearned_amount: unearnedAmount,
+      treasury_address: treasuryAddress || vault.owner_address,
+      transactions: {
+        employee_transfer: employeeTransfer,
+        treasury_transfer: treasuryTransfer,
+      },
+    };
+  }
+
+  /**
    * Get a compact summary of a vault.
    *
    * @param {string} vaultAddress
