@@ -119,13 +119,10 @@ const authService = require('./services/authService');
 const notificationService = require('./services/notificationService');
 const liquidityMonitorService = require('./services/liquidityMonitorService');
 const pdfService = require('./services/pdfService');
-<<<<<<< feat/rwa-legal-document-hashing-service
 const legalDocumentHashingService = require('./services/legalDocumentHashingService');
-=======
 const ledgerSyncService = require('./services/ledgerSyncService');
 const multiSigRevocationService = require('./services/multiSigRevocationService');
 const dividendService = require('./services/dividendService');
->>>>>>> main
 const VaultService = require('./services/vaultService');
 const monthlyReportJob = require('./jobs/monthlyReportJob');
 const { VaultReconciliationJob } = require('./jobs/vaultReconciliationJob');
@@ -563,6 +560,36 @@ app.post('/api/admin/revoke', async (req, res) => {
     res.json({ success: true, data: result });
   } catch (error) {
     console.error('Error revoking access:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/admin/clean-break', async (req, res) => {
+  try {
+    const {
+      vaultAddress,
+      beneficiaryAddress,
+      terminationTimestamp,
+      treasuryAddress,
+    } = req.body;
+
+    if (!vaultAddress || !beneficiaryAddress) {
+      return res.status(400).json({
+        success: false,
+        error: 'vaultAddress and beneficiaryAddress are required',
+      });
+    }
+
+    const result = await vestingService.calculateCleanBreak(
+      vaultAddress,
+      beneficiaryAddress,
+      terminationTimestamp || new Date(),
+      treasuryAddress,
+    );
+
+    res.json({ success: true, data: result });
+  } catch (error) {
+    console.error('Error executing clean break:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -1108,68 +1135,6 @@ app.get('/api/vault/:id/agreement.pdf', async (req, res) => {
     } else {
       res.destroy(error);
     }
-    // Token distribution endpoint for pie chart data
-    app.get('/api/token/:address/distribution', async (req, res) => {
-      try {
-        const { address } = req.params;
-        const { Vault } = require('./models');
-
-        // Get all vaults for this token address, grouped by tag
-        const distribution = await Vault.findAll({
-          attributes: [
-            'tag',
-            [sequelize.fn('SUM', sequelize.col('total_amount')), 'total_amount']
-          ],
-          where: {
-            token_address: address,
-            total_amount: {
-              [sequelize.Op.gt]: 0
-            }
-          },
-          group: ['tag'],
-          raw: true
-        });
-
-        // Format the response
-        const result = distribution
-          .filter(item => item.tag) // Filter out null tags
-          .map(item => ({
-            label: item.tag,
-            amount: parseFloat(item.total_amount)
-          }))
-          .sort((a, b) => b.amount - a.amount); // Sort by amount descending
-
-        res.json({
-          success: true,
-          data: result
-        });
-      } catch (error) {
-        console.error('Error fetching token distribution:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
-
-    // Dividend Distribution Endpoints
-    // POST /api/admin/dividend/round - Create new dividend round
-    app.post('/api/admin/dividend/round', authService.authenticate(true), async (req, res) => {
-      try {
-        const {
-          tokenAddress,
-          totalAmount,
-          dividendToken,
-          vestedTreatment = 'full',
-          unvestedMultiplier = 1.0
-        } = req.body;
-        const createdBy = req.user.address;
-
-        if (!tokenAddress || !totalAmount || !dividendToken) {
-          return res.status(400).json({
-            success: false,
-            error: 'tokenAddress, totalAmount, and dividendToken are required'
-          });
   }
 });
 
@@ -1190,68 +1155,162 @@ app.get('/api/token/:address/distribution', async (req, res) => {
         total_amount: {
           [sequelize.Op.gt]: 0
         }
+      },
+      group: ['tag'],
+      raw: true
+    });
 
-        const dividendRound = await dividendService.createDividendRound(
-          tokenAddress,
-          totalAmount,
-          dividendToken,
-          vestedTreatment,
-          unvestedMultiplier,
-          createdBy
-        );
+    // Format the response
+    const result = distribution
+      .filter(item => item.tag) // Filter out null tags
+      .map(item => ({
+        label: item.tag,
+        amount: parseFloat(item.total_amount)
+      }))
+      .sort((a, b) => b.amount - a.amount); // Sort by amount descending
 
-        res.status(201).json({
-          success: true,
-          data: dividendRound
-        });
-      } catch (error) {
-        console.error('Error creating dividend round:', error);
+    res.json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error fetching token distribution:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Dividend Distribution Endpoints
+// POST /api/admin/dividend/round - Create new dividend round
+app.post('/api/admin/dividend/round', authService.authenticate(true), async (req, res) => {
+  try {
+    const {
+      tokenAddress,
+      totalAmount,
+      dividendToken,
+      vestedTreatment = 'full',
+      unvestedMultiplier = 1.0
+    } = req.body;
+    const createdBy = req.user.address;
+
+    if (!tokenAddress || !totalAmount || !dividendToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'tokenAddress, totalAmount, and dividendToken are required'
+      });
+    }
+
+    const dividendRound = await dividendService.createDividendRound(
+      tokenAddress,
+      totalAmount,
+      dividendToken,
+      vestedTreatment,
+      unvestedMultiplier,
+      createdBy
+    );
+
+    res.status(201).json({
+      success: true,
+      data: dividendRound
+    });
+  } catch (error) {
+    console.error('Error creating dividend round:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Token distribution endpoint for pie chart data
+app.post('/api/admin/dividend/round', authService.authenticate(true), async (req, res) => {
+  try {
+    const {
+      tokenAddress,
+      totalAmount,
+      dividendToken,
+      vestedTreatment = 'full',
+      unvestedMultiplier = 1.0
+    } = req.body;
+
+    const createdBy = req.user.address;
+
+    if (!tokenAddress || !totalAmount || !dividendToken) {
+      return res.status(400).json({
+        success: false,
+        error: 'tokenAddress, totalAmount, and dividendToken are required'
+      });
+    }
+
+    const dividendRound = await dividendService.createDividendRound(
+      tokenAddress,
+      totalAmount,
+      dividendToken,
+      vestedTreatment,
+      unvestedMultiplier,
+      createdBy
+    );
+
+    return res.status(201).json({
+      success: true,
+      data: dividendRound
+    });
+
+  } catch (error) {
+    console.error('Error creating dividend round:', error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});// POST /api/admin/dividend/:roundId/snapshot - Take dividend snapshot
+app.post("/api/admin/dividend/:roundId/snapshot", 
+  authService.authenticate(true), async (req, res) => {
+  try {
+    const { roundId } = req.params;
+
+    const result = await dividendService.takeDividendSnapshot(roundId);
+
+    res.json({
+      success: true,
+      data: result
+    });
+  } catch (error) {
+    console.error('Error taking dividend snapshot:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// POST /api/admin/dividend/:roundId/calculate - Calculate dividend distributions
+app.post('/api/admin/dividend/:roundId/calculate', authService.authenticate(true), async (req, res) => {
+  try {
+    const { roundId } = req.params;
+
+    const distributions = await dividendService.calculateDividendDistributions(roundId);
+
+    res.json({
+      success: true,
+      data: distributions
+    });
+  } catch (error) {
+    console.error('Error calculating dividend distributions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}),
         res.status(500).json({
           success: false,
           error: error.message
         });
-      }
-    });
-
-    // POST /api/admin/dividend/:roundId/snapshot - Take dividend snapshot
-    app.post('/api/admin/dividend/:roundId/snapshot', authService.authenticate(true), async (req, res) => {
-      try {
-        const { roundId } = req.params;
-
-        const result = await dividendService.takeDividendSnapshot(roundId);
-
-        res.json({
-          success: true,
-          data: result
-        });
-      } catch (error) {
-        console.error('Error taking dividend snapshot:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
-
-    // POST /api/admin/dividend/:roundId/calculate - Calculate dividend distributions
-    app.post('/api/admin/dividend/:roundId/calculate', authService.authenticate(true), async (req, res) => {
-      try {
-        const { roundId } = req.params;
-
-        const distributions = await dividendService.calculateDividendDistributions(roundId);
-
-        res.json({
-          success: true,
-          data: distributions
-        });
-      } catch (error) {
-        console.error('Error calculating dividend distributions:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
-      }
-    });
+      
+    
 
     // POST /api/admin/dividend/:roundId/distribute - Distribute dividends
     app.post('/api/admin/dividend/:roundId/distribute', authService.authenticate(true), async (req, res) => {
@@ -1344,341 +1403,109 @@ app.get('/api/token/:address/distribution', async (req, res) => {
           success: true,
           data: stats
         });
-      } catch (error) {
-        console.error('Error getting dividend stats:', error);
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
-      }
-    // Sentry error handler must be before any other error middleware and after all controllers
-    if (process.env.SENTRY_DSN && Sentry.Handlers) {
-      app.use(Sentry.Handlers.errorHandler());
-    }
+  } catch (error) {
+    console.error('Error getting dividend stats:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 
-    // Start server
-    const startServer = async () => {
-      try {
-        await sequelize.authenticate();
-        console.log('Database connection established successfully.');
+// Sentry error handler must be before any other error middleware and after all controllers
+if (process.env.SENTRY_DSN && Sentry.Handlers) {
+  app.use(Sentry.Handlers.errorHandler());
+}
 
-        await sequelize.sync();
-        console.log('Database synchronized successfully.');
+  
+ const startServer = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('Database connection established successfully.');
 
-        // Initialize Redis Cache
-        console.log('Database synchronized successfully.');
+    await sequelize.sync();
+    console.log('Database synchronized successfully.');
 
-        try {
-          await cacheService.connect();
-          if (cacheService.isReady()) {
-            console.log('Redis cache connected successfully.');
-          } else {
-            console.log('Redis cache not available, continuing without caching...');
-          }
-        } catch (cacheError) {
-          console.error('Failed to connect to Redis:', cacheError);
-          console.log('Continuing without Redis cache...');
-        }
-
-        // Initialize GraphQL Server
-        let graphQLServer = null;
-        try {
-          const { GraphQLServer } = require('./graphql/server');
-          graphQLServer = new GraphQLServer(app, httpServer);
-          await graphQLServer.start();
-          await graphQLServer.applyMiddleware(app);
-          console.log('GraphQL Server initialized successfully.');
-
-          const serverInfo = graphQLServer.getServerInfo();
-          console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
-          console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
-        } catch (graphqlError) {
-          console.error('Failed to initialize GraphQL Server:', graphqlError);
-          console.log('Continuing with REST API only...');
-        }
-
-        // Initialize Discord Bot
-        try {
-          await discordBotService.start();
-        } catch (discordError) {
-          console.error('Failed to initialize Discord Bot:', discordError);
-          console.log('Continuing without Discord bot...');
-        }
-
-        // Initialize Monthly Report Job
-        try {
-          monthlyReportJob.start();
-        } catch (jobError) {
-          console.error('Failed to initialize Monthly Report Job:', jobError);
-        }
-
-        // Initialize Vault Reconciliation Job
-        const vaultReconciliationJob = new VaultReconciliationJob();
-        try {
-          vaultReconciliationJob.start();
-          console.log('Vault Reconciliation Job started successfully.');
-        } catch (jobError) {
-          console.error('Failed to initialize Vault Reconciliation Job:', jobError);
-          console.log('Continuing without vault reconciliation...');
-        }
-
-        // Initialize Integrity Monitoring Job
-        try {
-          integrityMonitoringJob.start();
-          console.log('Integrity Monitoring Job started successfully.');
-        } catch (jobError) {
-          console.error('Failed to initialize Integrity Monitoring Job:', jobError);
-        }
-
-        // Initialize Notification Service (includes cliff notification cron job)
-        try {
-          notificationService.start();
-          console.log('Notification service started successfully.');
-        } catch (notificationError) {
-          console.error('Failed to initialize Notification Service:', notificationError);
-          console.log('Continuing without notification cron job...');
-
-    // Start server
-    const startServer = async () => {
-      try {
-        await sequelize.authenticate();
-        console.log('Database connection established successfully.');
-
-        await sequelize.sync();
-        console.log('Database synchronized successfully.');
-
-        // Initialize Redis Cache
-        console.log('Database synchronized successfully.');
-
-        try {
-          await cacheService.connect();
-          if (cacheService.isReady()) {
-            console.log('Redis cache connected successfully.');
-          } else {
-            console.log('Redis cache not available, continuing without caching...');
-          }
-        } catch (cacheError) {
-          console.error('Failed to connect to Redis:', cacheError);
-          console.log('Continuing without Redis cache...');
-        }
-
-        // Initialize GraphQL Server
-        let graphQLServer = null;
-        try {
-          const { GraphQLServer } = require('./graphql/server');
-          graphQLServer = new GraphQLServer(app, httpServer);
-          await graphQLServer.start();
-          await graphQLServer.applyMiddleware(app);
-          console.log('GraphQL Server initialized successfully.');
-
-          const serverInfo = graphQLServer.getServerInfo();
-          console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
-          console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
-        } catch (graphqlError) {
-          console.error('Failed to initialize GraphQL Server:', graphqlError);
-          console.log('Continuing with REST API only...');
-        }
-
-        // Initialize Discord Bot
-        try {
-          await discordBotService.start();
-        } catch (discordError) {
-          console.error('Failed to initialize Discord Bot:', discordError);
-          console.log('Continuing without Discord bot...');
-        }
     // Initialize Redis Cache
-
-        // Initialize Monthly Report Job
-        try {
-          monthlyReportJob.start();
-        } catch (jobError) {
-          console.error('Failed to initialize Monthly Report Job:', jobError);
-        }
-
-        // Initialize Vault Reconciliation Job
-        const vaultReconciliationJob = new VaultReconciliationJob();
-        try {
-          vaultReconciliationJob.start();
-          console.log('Vault Reconciliation Job started successfully.');
-        } catch (jobError) {
-          console.error('Failed to initialize Vault Reconciliation Job:', jobError);
-          console.log('Continuing without vault reconciliation...');
-        }
-
-        // Initialize Notification Service (includes cliff notification cron job)
-        try {
-          notificationService.start();
-          console.log('Notification service started successfully.');
-        } catch (notificationError) {
-          console.error('Failed to initialize Notification Service:', notificationError);
-          console.log('Continuing without notification cron job...');
-        }
-
-        // Initialize Ledger Sync Service - Critical for financial consistency
-        try {
-          await ledgerSyncService.loadPausedVaults();
-          ledgerSyncService.start();
-          console.log('🔍 Ledger Sync Service started - checking vault consistency every 60 seconds');
-        } catch (ledgerError) {
-          console.error('❌ Failed to initialize Ledger Sync Service:', ledgerError);
-          console.log('⚠️  WARNING: Ledger consistency checking is disabled - financial data may be inconsistent!');
-          Sentry.captureException(ledgerError, {
-            tags: { service: 'ledger-sync', severity: 'critical' },
-            extra: { impact: 'Financial consistency checking disabled' }
-          });
-        }
-
-        // Start the HTTP server
-        httpServer.listen(PORT, () => {
-          console.log(`Server is running on port ${PORT}`);
-          console.log(`REST API available at: http://localhost:${PORT}`);
-          if (graphQLServer) {
-            console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
-          }
-
-        });
-      } catch (error) {
-        console.error('Unable to start server:', error);
-        process.exit(1);
-    // Initialize Vault Archival Job
     try {
-      vaultArchivalJob.start();
-    } catch (jobError) {
-      console.error('Failed to initialize Vault Archival Job:', jobError);
-      console.log('Continuing without vault archival...');
+      await cacheService.connect();
+      if (cacheService.isReady()) {
+        console.log('Redis cache connected successfully.');
+      } else {
+        console.log('Redis cache not available, continuing without caching...');
+      }
+    } catch (cacheError) {
+      console.error('Failed to connect to Redis:', cacheError);
+      console.log('Continuing without Redis cache...');
     }
 
-    // Initialize Notification Service (includes cliff notification cron job)
+    // Initialize GraphQL Server
+    let graphQLServer = null;
+    try {
+      const { GraphQLServer } = require('./graphql/server');
+      graphQLServer = new GraphQLServer(app, httpServer);
+      await graphQLServer.start();
+      await graphQLServer.applyMiddleware(app);
+      console.log('GraphQL Server initialized successfully.');
+
+      const serverInfo = graphQLServer.getServerInfo();
+      console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
+      console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
+    } catch (graphqlError) {
+      console.error('Failed to initialize GraphQL Server:', graphqlError);
+      console.log('Continuing with REST API only...');
+    }
+
+    // Initialize Discord Bot
+    try {
+      await discordBotService.start();
+    } catch (discordError) {
+      console.error('Failed to initialize Discord Bot:', discordError);
+      console.log('Continuing without Discord bot...');
+    }
+
+    // Initialize Monthly Report Job
+    try {
+      monthlyReportJob.start();
+    } catch (jobError) {
+      console.error('Failed to initialize Monthly Report Job:', jobError);
+    }
+
+    // Initialize Vault Reconciliation Job
+    const vaultReconciliationJob = new VaultReconciliationJob();
+    try {
+      vaultReconciliationJob.start();
+      console.log('Vault Reconciliation Job started successfully.');
+    } catch (jobError) {
+      console.error('Failed to initialize Vault Reconciliation Job:', jobError);
+    }
+
+    // Initialize Notification Service
     try {
       notificationService.start();
       console.log('Notification service started successfully.');
     } catch (notificationError) {
       console.error('Failed to initialize Notification Service:', notificationError);
-      console.log('Continuing without notification cron job...');
     }
 
-    try {
-      liquidityMonitorService.start();
-      console.log('Liquidity monitor service started successfully.');
-    } catch (liquidityMonitorError) {
-      console.error('Failed to initialize Liquidity Monitor Service:', liquidityMonitorError);
-      console.log('Continuing without liquidity monitor...');
-    }
-    
-    // Start the HTTP server
+    // Start HTTP server
     httpServer.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);
       console.log(`REST API available at: http://localhost:${PORT}`);
       if (graphQLServer) {
         console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
-        });
-      } catch (error) {
-        console.error('Unable to start server:', error);
-        process.exit(1);
       }
-    };
-
-    startServer();
     });
 
-    // Sentry error handler must be before any other error middleware and after all controllers
-    if (process.env.SENTRY_DSN && Sentry.Handlers) {
-      app.use(Sentry.Handlers.errorHandler());
-    }
+  } catch (error) {
+    console.error('Unable to start server:', error);
+    process.exit(1);
+  }
+};
 
-    // Start server
-    const startServer = async () => {
-      try {
-        await sequelize.authenticate();
-        console.log('Database connection established successfully.');
-
-        await sequelize.sync();
-        console.log('Database synchronized successfully.');
-
-        // Initialize Redis Cache
-        console.log('Database synchronized successfully.');
-
-        try {
-          await cacheService.connect();
-          if (cacheService.isReady()) {
-            console.log('Redis cache connected successfully.');
-          } else {
-            console.log('Redis cache not available, continuing without caching...');
-          }
-        } catch (cacheError) {
-          console.error('Failed to connect to Redis:', cacheError);
-          console.log('Continuing without Redis cache...');
-        }
-
-        // Initialize GraphQL Server
-        let graphQLServer = null;
-        try {
-          const { GraphQLServer } = require('./graphql/server');
-          graphQLServer = new GraphQLServer(app, httpServer);
-          await graphQLServer.start();
-          await graphQLServer.applyMiddleware(app);
-          console.log('GraphQL Server initialized successfully.');
-
-          const serverInfo = graphQLServer.getServerInfo();
-          console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
-          console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
-        } catch (graphqlError) {
-          console.error('Failed to initialize GraphQL Server:', graphqlError);
-          console.log('Continuing with REST API only...');
-        }
-
-        // Initialize Discord Bot
-        try {
-          await discordBotService.start();
-        } catch (discordError) {
-          console.error('Failed to initialize Discord Bot:', discordError);
-          console.log('Continuing without Discord bot...');
-        }
-
-        // Initialize Monthly Report Job
-        try {
-          monthlyReportJob.start();
-        } catch (jobError) {
-          console.error('Failed to initialize Monthly Report Job:', jobError);
-        }
-
-        // Initialize Vault Reconciliation Job
-        const vaultReconciliationJob = new VaultReconciliationJob();
-        try {
-          vaultReconciliationJob.start();
-          console.log('Vault Reconciliation Job started successfully.');
-        } catch (jobError) {
-          console.error('Failed to initialize Vault Reconciliation Job:', jobError);
-          console.log('Continuing without vault reconciliation...');
-        }
-
-        // Initialize Notification Service (includes cliff notification cron job)
-        try {
-          notificationService.start();
-          console.log('Notification service started successfully.');
-        } catch (notificationError) {
-          console.error('Failed to initialize Notification Service:', notificationError);
-          console.log('Continuing without notification cron job...');
-        }
-
-        // Start the HTTP server
-        httpServer.listen(PORT, () => {
-          console.log(`Server is running on port ${PORT}`);
-          console.log(`REST API available at: http://localhost:${PORT}`);
-          if (graphQLServer) {
-            console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
-          }
-
-        });
-      } catch (error) {
-        console.error('Unable to start server:', error);
-        process.exit(1);
-      }
-    };
-
-    startServer();
+// ✅ Only start once if run directly
 if (require.main === module) {
   startServer();
 }
 
-module.exports = app;
+module.exports = { app, startServer };
