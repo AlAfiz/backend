@@ -127,6 +127,7 @@ const vaultExportService = require('./services/vaultExportService');
 const authService = require('./services/authService');
 const notificationService = require('./services/notificationService');
 const liquidityMonitorService = require('./services/liquidityMonitorService');
+const rule144ComplianceService = require('./services/rule144ComplianceService');
 const pdfService = require('./services/pdfService');
 const legalDocumentHashingService = require('./services/legalDocumentHashingService');
 const ledgerSyncService = require('./services/ledgerSyncService');
@@ -1118,7 +1119,8 @@ app.get('/api/admin/multi-sig/stats', authService.authenticate(true), async (req
   }
 });
 
-// GET /api/vaults/:id/export', async (req, res) => {
+// GET /api/vaults/:id/export
+app.get('/api/vaults/:id/export', async (req, res) => {
 try {
   const { id } = req.params;
   await vaultExportService.streamVaultAsCSV(id, res);
@@ -1132,6 +1134,7 @@ try {
     res.destroy(error);
   }
 }
+});
 // Balance query endpoint
 app.get('/api/vaults/:id/balance', async (req, res) => {
   try {
@@ -1326,8 +1329,11 @@ app.get('/api/token/:address/distribution', async (req, res) => {
         total_amount: {
           [sequelize.Op.gt]: 0
         }
+      },
+      group: ['tag']
+    });
 
-        const dividendRound = await dividendService.createDividendRound(
+    const dividendRound = await dividendService.createDividendRound(
           tokenAddress,
           totalAmount,
           dividendToken,
@@ -1388,6 +1394,174 @@ app.get('/api/token/:address/distribution', async (req, res) => {
         });
       }
     });
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // SEC Rule 144 Compliance Monitor Routes
+    // ─────────────────────────────────────────────────────────────────────────────
+
+    // GET /api/compliance/rule144/:vaultId/:userAddress - Get user compliance status
+    app.get('/api/compliance/rule144/:vaultId/:userAddress', async (req, res) => {
+      try {
+        const { vaultId, userAddress } = req.params;
+        const complianceStatus = await rule144ComplianceService.getUserComplianceStatus(vaultId, userAddress);
+        
+        res.json({
+          success: true,
+          data: complianceStatus
+        });
+      } catch (error) {
+        console.error('Error getting user compliance status:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // GET /api/compliance/rule144/vault/:vaultId - Get vault compliance status (Admin)
+    app.get('/api/compliance/rule144/vault/:vaultId', authService.authenticate(true), async (req, res) => {
+      try {
+        const { vaultId } = req.params;
+        const vaultCompliance = await rule144ComplianceService.getVaultComplianceStatus(vaultId);
+        
+        res.json({
+          success: true,
+          data: vaultCompliance
+        });
+      } catch (error) {
+        console.error('Error getting vault compliance status:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // GET /api/compliance/rule144/statistics - Get compliance statistics
+    app.get('/api/compliance/rule144/statistics', authService.authenticate(true), async (req, res) => {
+      try {
+        const { vaultId } = req.query;
+        const statistics = await rule144ComplianceService.getComplianceStatistics(vaultId);
+        
+        res.json({
+          success: true,
+          data: statistics
+        });
+      } catch (error) {
+        console.error('Error getting compliance statistics:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // POST /api/compliance/rule144/create - Create compliance record (Admin)
+    app.post('/api/compliance/rule144/create', authService.authenticate(true), async (req, res) => {
+      try {
+        const {
+          vaultId,
+          userAddress,
+          tokenAddress,
+          acquisitionDate,
+          holdingPeriodMonths = 6,
+          totalAmountAcquired = '0',
+          isRestrictedSecurity = true,
+          jurisdiction = 'US'
+        } = req.body;
+
+        if (!vaultId || !userAddress || !tokenAddress || !acquisitionDate) {
+          return res.status(400).json({
+            success: false,
+            error: 'vaultId, userAddress, tokenAddress, and acquisitionDate are required'
+          });
+        }
+
+        const complianceRecord = await rule144ComplianceService.createComplianceRecord({
+          vaultId,
+          userAddress,
+          tokenAddress,
+          acquisitionDate: new Date(acquisitionDate),
+          holdingPeriodMonths,
+          totalAmountAcquired,
+          isRestrictedSecurity,
+          jurisdiction
+        });
+
+        res.status(201).json({
+          success: true,
+          data: complianceRecord
+        });
+      } catch (error) {
+        console.error('Error creating compliance record:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // PUT /api/compliance/rule144/:vaultId/:userAddress - Update compliance record (Admin)
+    app.put('/api/compliance/rule144/:vaultId/:userAddress', authService.authenticate(true), async (req, res) => {
+      try {
+        const { vaultId, userAddress } = req.params;
+        const updateData = req.body;
+
+        const updatedRecord = await rule144ComplianceService.updateComplianceRecord(
+          vaultId,
+          userAddress,
+          {
+            ...updateData,
+            verifiedBy: req.user.address,
+            verificationDate: new Date()
+          }
+        );
+
+        res.json({
+          success: true,
+          data: updatedRecord
+        });
+      } catch (error) {
+        console.error('Error updating compliance record:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // POST /api/compliance/rule144/bulk-create - Bulk create compliance records (Admin)
+    app.post('/api/compliance/rule144/bulk-create', authService.authenticate(true), async (req, res) => {
+      try {
+        const { records } = req.body;
+
+        if (!Array.isArray(records) || records.length === 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'records array is required'
+          });
+        }
+
+        const results = await rule144ComplianceService.bulkCreateComplianceRecords(records);
+
+        res.status(201).json({
+          success: true,
+          data: {
+            created: results.created,
+            failed: results.failed,
+            total: records.length
+          }
+        });
+      } catch (error) {
+        console.error('Error bulk creating compliance records:', error);
+        res.status(500).json({
+          success: false,
+          error: error.message
+        });
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────────────
 
     // POST /api/admin/dividend/:roundId/distribute - Distribute dividends
     app.post('/api/admin/dividend/:roundId/distribute', authService.authenticate(true), async (req, res) => {
@@ -1676,6 +1850,9 @@ app.get('/api/token/:address/distribution', async (req, res) => {
       } catch (error) {
         console.error('Unable to start server:', error);
         process.exit(1);
+      }
+    }
+
     // Initialize Vault Archival Job
     try {
       vaultArchivalJob.start();
@@ -1707,112 +1884,21 @@ app.get('/api/token/:address/distribution', async (req, res) => {
       console.log(`REST API available at: http://localhost:${PORT}`);
       if (graphQLServer) {
         console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
-        });
-      } catch (error) {
-        console.error('Unable to start server:', error);
-        process.exit(1);
       }
-    };
-
-    startServer();
     });
+  } catch (error) {
+    console.error('Unable to start server:', error);
+    process.exit(1);
+  }
+};
 
-    // Sentry error handler must be before any other error middleware and after all controllers
-    if (process.env.SENTRY_DSN && Sentry.Handlers) {
-      app.use(Sentry.Handlers.errorHandler());
-    }
+// Sentry error handler must be before any other error middleware and after all controllers
+if (process.env.SENTRY_DSN && Sentry.Handlers) {
+  app.use(Sentry.Handlers.errorHandler());
+}
 
-    // Start server
-    const startServer = async () => {
-      try {
-        await sequelize.authenticate();
-        console.log('Database connection established successfully.');
+startServer();
 
-        await sequelize.sync();
-        console.log('Database synchronized successfully.');
-
-        // Initialize Redis Cache
-        console.log('Database synchronized successfully.');
-
-        try {
-          await cacheService.connect();
-          if (cacheService.isReady()) {
-            console.log('Redis cache connected successfully.');
-          } else {
-            console.log('Redis cache not available, continuing without caching...');
-          }
-        } catch (cacheError) {
-          console.error('Failed to connect to Redis:', cacheError);
-          console.log('Continuing without Redis cache...');
-        }
-
-        // Initialize GraphQL Server
-        let graphQLServer = null;
-        try {
-          const { GraphQLServer } = require('./graphql/server');
-          graphQLServer = new GraphQLServer(app, httpServer);
-          await graphQLServer.start();
-          await graphQLServer.applyMiddleware(app);
-          console.log('GraphQL Server initialized successfully.');
-
-          const serverInfo = graphQLServer.getServerInfo();
-          console.log(`GraphQL Playground available at: ${serverInfo.playgroundUrl}`);
-          console.log(`GraphQL Subscriptions available at: ${serverInfo.subscriptionEndpoint}`);
-        } catch (graphqlError) {
-          console.error('Failed to initialize GraphQL Server:', graphqlError);
-          console.log('Continuing with REST API only...');
-        }
-
-        // Initialize Discord Bot
-        try {
-          await discordBotService.start();
-        } catch (discordError) {
-          console.error('Failed to initialize Discord Bot:', discordError);
-          console.log('Continuing without Discord bot...');
-        }
-
-        // Initialize Monthly Report Job
-        try {
-          monthlyReportJob.start();
-        } catch (jobError) {
-          console.error('Failed to initialize Monthly Report Job:', jobError);
-        }
-
-        // Initialize Vault Reconciliation Job
-        const vaultReconciliationJob = new VaultReconciliationJob();
-        try {
-          vaultReconciliationJob.start();
-          console.log('Vault Reconciliation Job started successfully.');
-        } catch (jobError) {
-          console.error('Failed to initialize Vault Reconciliation Job:', jobError);
-          console.log('Continuing without vault reconciliation...');
-        }
-
-        // Initialize Notification Service (includes cliff notification cron job)
-        try {
-          notificationService.start();
-          console.log('Notification service started successfully.');
-        } catch (notificationError) {
-          console.error('Failed to initialize Notification Service:', notificationError);
-          console.log('Continuing without notification cron job...');
-        }
-
-        // Start the HTTP server
-        httpServer.listen(PORT, () => {
-          console.log(`Server is running on port ${PORT}`);
-          console.log(`REST API available at: http://localhost:${PORT}`);
-          if (graphQLServer) {
-            console.log(`GraphQL API available at: http://localhost:${PORT}/graphql`);
-          }
-
-        });
-      } catch (error) {
-        console.error('Unable to start server:', error);
-        process.exit(1);
-      }
-    };
-
-    startServer();
 if (require.main === module) {
   startServer();
 }
