@@ -47,6 +47,8 @@ const models = {
   Rule144Compliance,
   TaxCalculation,
   TaxJurisdiction,
+  KycStatus,
+  KycNotification,
   RevocationProposal,
   RevocationSignature,
   MultiSigConfig,

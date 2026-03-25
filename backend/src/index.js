@@ -1774,6 +1774,10 @@ const startServer = async () => {
 
 // ✅ Only start once if run directly
 if (require.main === module) {
+  // Start KYC expiration worker
+  console.log('🔍 Starting KYC expiration monitoring worker...');
+  kycExpirationWorker.start();
+
   startServer();
 }
 
